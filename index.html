@@ -57,7 +57,7 @@ summary::-webkit-details-marker{display:none}
    <button onclick="show('store')" class="ib gap-2 border-0" data-ic="store"><span class="hidden text-sm sm:inline">Store</span></button>
    <button onclick="$('#cart').showModal()" class="ib" aria-label="Open cart" data-ic="cart"><span id="badge" class="absolute -right-1.5 -top-1.5 hidden h-5 min-w-5 place-items-center rounded-full bg-brand px-1 text-xs">0</span></button>
    <a id="adminlink" href="admin.html" class="ib hidden font-medium">Admin</a>
-   <button id="signin" onclick="openAuth('in')" class="ib font-medium">Sign in</button>
+   <button id="signin" onclick="authBtn()" class="ib font-medium">Sign in</button>
   </nav>
  </div>
 </header>
@@ -207,12 +207,12 @@ summary::-webkit-details-marker{display:none}
    <button id="t-up" role="tab" onclick="tab('up')" class="rounded-lg py-2 font-medium">Sign up</button>
   </div>
   <p id="aerr" role="alert" class="mb-4 hidden rounded-lg bg-red-950/60 px-3 py-2 text-sm text-red-300"></p>
-  <form id="f-in" onsubmit="go(event,'/api/auth/login')" class="space-y-4">
+  <form id="f-in" onsubmit="go(event,'login')" class="space-y-4">
    <label class="block text-sm"><span class="mb-1 block text-mute">Email</span><input class="field" type="email" name="email" required autocomplete="email"></label>
    <label class="block text-sm"><span class="mb-1 block text-mute">Password</span><input class="field" type="password" name="password" required autocomplete="current-password"></label>
    <button class="btn w-full" type="submit">Sign in</button>
   </form>
-  <form id="f-up" onsubmit="go(event,'/api/auth/signup')" class="hidden space-y-4">
+  <form id="f-up" onsubmit="go(event,'signup')" class="hidden space-y-4">
    <label class="block text-sm"><span class="mb-1 block text-mute">Full name</span><input class="field" name="full_name" required minlength="2" maxlength="120" autocomplete="name"></label>
    <label class="block text-sm"><span class="mb-1 block text-mute">Email</span><input class="field" type="email" name="email" required autocomplete="email"></label>
    <label class="block text-sm"><span class="mb-1 block text-mute">Phone (optional)</span><input class="field" type="tel" name="phone" placeholder="+234…" autocomplete="tel"></label>
@@ -281,14 +281,12 @@ let products=[
 const ago=t=>{if(!t)return'';const d=Math.floor((Date.now()-new Date(t))/864e5);return d<1?'Listed today':d<7?`Listed ${d} day${d>1?'s':''} ago`:d<30?`Listed ${Math.floor(d/7)} week${d>13?'s':''} ago`:`Listed ${Math.floor(d/30)} month${d>59?'s':''} ago`};
 async function loadProducts(){
  try{
-  const r=await fetch('/api/products',{credentials:'same-origin'});
-  if(!r.ok)throw 0;
-  const rows=(await r.json()).products||[];
+  const rows=await sb('/rest/v1/products?select=id,name,price,compare_at_price,description,image_url,created_at,stock_qty&is_active=eq.true&order=created_at.desc');
   if(!rows.length)return;
   products=rows.map(x=>({id:x.id,n:x.name,p:+x.price,o:x.compare_at_price?+x.compare_at_price:0,desc:x.description,img:x.image_url,t:x.created_at,stock:x.stock_qty}));
   for(const k of Object.keys(cart))delete cart[k];
   $('#pc').textContent=products.length;upd();render();
- }catch(e){/* keep the built-in list when the API is unreachable */}
+ }catch(e){/* keep the built-in list when the database is unreachable */}
 }
 const cart={},saved=new Set();
 function render(){
@@ -312,12 +310,49 @@ function upd(){
 }
 function show(v){$('#home').classList.toggle('hidden',v!=='home');$('#store').classList.toggle('hidden',v!=='store');scrollTo(0,0)}
 
-/* ---------- auth + newsletter ---------- */
-async function post(url,body){
- const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},credentials:'same-origin',body:JSON.stringify(body)});
- const d=await r.json().catch(()=>({}));
- if(!r.ok)throw new Error(d.error||'Something went wrong. Please try again.');
+/* ---------- Supabase (auth, products, newsletter) ---------- */
+const SB_URL='https://cogvdueznqgjfljemkxx.supabase.co';
+const SB_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNvZ3ZkdWV6bnFnamZsamVta3h4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTMwMzIxNzYsImV4cCI6MjEwODYwODE3Nn0.oIvcCQqf2SdykN0x_csYzbL-wLtBT4kU1Tv-5AmO1VA'; // public anon key; data is protected by row-level security
+let session=null;
+const saveSess=v=>{session=v;try{v?localStorage.setItem('uv_session',JSON.stringify(v)):localStorage.removeItem('uv_session')}catch(e){}};
+const friendly=d=>{
+ const m=d.msg||d.error_description||d.message||'',c=d.error_code||d.code||'';
+ if(c==='invalid_credentials'||/invalid login/i.test(m))return'Email or password is incorrect.';
+ if(c==='email_not_confirmed'||/not confirmed/i.test(m))return'Confirm your email first. Check your inbox for the link.';
+ if(c==='user_already_exists'||/already registered/i.test(m))return'An account with this email already exists. Sign in instead.';
+ if(c==='weak_password')return'Choose a stronger password (at least 8 characters).';
+ if(c==='over_email_send_rate_limit'||/rate limit/i.test(m))return'Too many attempts. Wait a few minutes and try again.';
+ return m||'Something went wrong. Please try again.';
+};
+async function sb(path,o={}){
+ const h={apikey:SB_KEY,Authorization:'Bearer '+(o.tok||SB_KEY),'Content-Type':'application/json'};
+ if(o.prefer)h.Prefer=o.prefer;
+ const r=await fetch(SB_URL+path,{method:o.method||'GET',headers:h,body:o.body?JSON.stringify(o.body):undefined});
+ const t=await r.text();let d={};try{d=t?JSON.parse(t):{}}catch(e){}
+ if(!r.ok){const e=new Error(friendly(d));e.status=r.status;throw e}
  return d;
+}
+function note(t,ok){$('#aerr').textContent=t;$('#aerr').className='mb-4 rounded-lg px-3 py-2 text-sm '+(ok?'bg-green-950/60 text-green-300':'bg-red-950/60 text-red-300')}
+async function applySession(v){
+ saveSess(v);
+ const u=v.user||{};
+ $('#signin').textContent=((u.user_metadata&&u.user_metadata.full_name)||'Account').split(' ')[0];
+ let admin=false;
+ try{const p=await sb('/rest/v1/profiles?select=role&id=eq.'+u.id,{tok:v.access_token});admin=!!p[0]&&p[0].role==='admin'}catch(e){}
+ $('#adminlink').classList.toggle('hidden',!admin);
+}
+function clearSession(){saveSess(null);$('#signin').textContent='Sign in';$('#adminlink').classList.add('hidden')}
+async function restoreSession(){
+ let v;try{v=JSON.parse(localStorage.getItem('uv_session'))}catch(e){}
+ if(!v||!v.access_token)return;
+ try{
+  if(v.expires_at*1000<Date.now()+60000)v=await sb('/auth/v1/token?grant_type=refresh_token',{method:'POST',body:{refresh_token:v.refresh_token}});
+  await applySession(v);
+ }catch(e){clearSession()}
+}
+function authBtn(){
+ if(!session){openAuth('in');return}
+ if(confirm('Sign out?')){sb('/auth/v1/logout',{method:'POST',tok:session.access_token}).catch(()=>{});clearSession()}
 }
 function tab(t){
  const up=t==='up';
@@ -326,34 +361,38 @@ function tab(t){
  for(const k of['in','up']){const b=$('#t-'+k),on=k===t;b.setAttribute('aria-selected',on);b.classList.toggle('bg-brand',on);b.classList.toggle('text-white',on);b.classList.toggle('text-mute',!on)}
 }
 function openAuth(t){tab(t);$('#auth').showModal()}
-async function go(e,url){
+async function go(e,mode){
  e.preventDefault();
- const f=e.target,b=f.querySelector('[type=submit]'),err=$('#aerr'),label=b.textContent;
- err.classList.add('hidden');b.disabled=true;b.textContent='Please wait…';
+ const f=e.target,btn=f.querySelector('[type=submit]'),label=btn.textContent;
+ $('#aerr').classList.add('hidden');btn.disabled=true;btn.textContent='Please wait…';
  try{
-  const d=await post(url,Object.fromEntries(new FormData(f)));
-  $('#signin').textContent=(d.user&&d.user.full_name||'Account').split(' ')[0];
-  if(d.user&&d.user.role==='admin')$('#adminlink').classList.remove('hidden');
-  $('#auth').close();f.reset();
- }catch(x){
-  err.textContent=x instanceof TypeError?'Can’t reach the server. Check your connection and try again.':x.message;
-  err.classList.remove('hidden');
- }
- b.disabled=false;b.textContent=label;
+  const email=f.email.value.trim().toLowerCase(),password=f.password.value;
+  let v;
+  if(mode==='signup'){
+   const data={full_name:f.full_name.value.trim()};
+   if(f.phone.value.trim())data.phone=f.phone.value.trim();
+   v=await sb('/auth/v1/signup',{method:'POST',body:{email,password,data}});
+   if(!v.access_token){note('Account created. Check your email to confirm it, then sign in.',true);f.reset();return}
+  }else v=await sb('/auth/v1/token?grant_type=password',{method:'POST',body:{email,password}});
+  await applySession(v);$('#auth').close();f.reset();
+ }catch(x){note(x instanceof TypeError?'Can’t reach the server. Check your connection and try again.':x.message,false)}
+ finally{btn.disabled=false;btn.textContent=label}
 }
 async function sub(e){
  e.preventDefault();
- const f=e.target,m=$('#nmsg'),b=f.querySelector('button');
- b.disabled=true;m.textContent='';
- try{await post('/api/newsletter',{email:f.email.value});m.textContent='You’re subscribed. Thank you!';f.reset()}
- catch(x){m.textContent=x instanceof TypeError?'Can’t reach the server. Try again shortly.':x.message}
- b.disabled=false;
+ const f=e.target,m=$('#nmsg'),btn=f.querySelector('button');
+ btn.disabled=true;m.textContent='';
+ try{
+  await sb('/rest/v1/newsletter_subscribers?on_conflict=email',{method:'POST',body:{email:f.email.value.trim().toLowerCase()},prefer:'resolution=ignore-duplicates,return=minimal'});
+  m.textContent='You’re subscribed. Thank you!';f.reset();
+ }catch(x){m.textContent=x instanceof TypeError?'Can’t reach the server. Try again shortly.':x.message}
+ btn.disabled=false;
 }
 
 /* ---------- init ---------- */
 $('#q').addEventListener('input',render);
 for(const d of document.querySelectorAll('dialog'))d.addEventListener('click',e=>{if(e.target===d)d.close()});
-icons();render();upd();tab('in');loadProducts();
+icons();render();upd();tab('in');loadProducts();restoreSession();
 </script>
 </body>
 </html>
